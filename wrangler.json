@@ -1,5 +1,5 @@
 {
-  "name": "kilnmaster-ai",
+  "name": "kilnmaster",
   "compatibility_date": "2024-12-04",
   "assets": {
     "directory": "./dist"
