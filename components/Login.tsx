@@ -72,25 +72,27 @@ const Login: React.FC<Props> = ({ onLogin, isDarkMode = false, onToggleDarkMode 
           )}
 
           <div className="space-y-4">
-            <div>
-              <label className="block text-xs font-bold text-stone-500 dark:text-stone-400 uppercase mb-1">
-                後台 API 網址 (Google Apps Script)
-              </label>
-              <div className="relative">
-                <Link2 className="absolute left-3 top-3 w-5 h-5 text-stone-400" />
-                <input
-                  type="url"
-                  value={scriptUrl}
-                  onChange={(e) => setScriptUrl(e.target.value)}
-                  placeholder="https://script.google.com/macros/s/..."
-                  required
-                  className="w-full pl-10 pr-4 py-2 border border-stone-300 dark:border-stone-700 bg-white dark:bg-stone-800 text-stone-900 dark:text-stone-100 rounded-lg focus:ring-2 focus:ring-clay-500 focus:outline-none text-sm"
-                />
+            {!import.meta.env.VITE_API_URL && (
+              <div>
+                <label className="block text-xs font-bold text-stone-500 dark:text-stone-400 uppercase mb-1">
+                  後台 API 網址 (Google Apps Script)
+                </label>
+                <div className="relative">
+                  <Link2 className="absolute left-3 top-3 w-5 h-5 text-stone-400" />
+                  <input
+                    type="url"
+                    value={scriptUrl}
+                    onChange={(e) => setScriptUrl(e.target.value)}
+                    placeholder="https://script.google.com/macros/s/..."
+                    required
+                    className="w-full pl-10 pr-4 py-2 border border-stone-300 dark:border-stone-700 bg-white dark:bg-stone-800 text-stone-900 dark:text-stone-100 rounded-lg focus:ring-2 focus:ring-clay-500 focus:outline-none text-sm"
+                  />
+                </div>
+                <p className="text-[10px] text-stone-400 mt-1 ml-1">
+                  請輸入您部署的 Web App URL
+                </p>
               </div>
-              <p className="text-[10px] text-stone-400 mt-1 ml-1">
-                請輸入您部署的 Web App URL
-              </p>
-            </div>
+            )}
 
             <div>
               <label className="block text-xs font-bold text-stone-500 dark:text-stone-400 uppercase mb-1">
