@@ -99,8 +99,8 @@ function App() {
       scheduleName: activeSchedule.name,
       date: new Date().toISOString(),
       predictedDuration: activeSchedule.estimatedDurationMinutes,
-      theoreticalDuration: theoreticalMinutes, // Save theoretical baseline
       actualDuration: result.actualDuration,
+      clayWeight: activeSchedule.clayWeight,
       notes: result.notes,
       outcome: result.outcome
     };

@@ -12,15 +12,17 @@ export interface FiringSchedule {
   name: string;
   segments: FiringSegment[];
   estimatedDurationMinutes: number;
+  clayWeight?: number; // Estimated weight of clay in kg
 }
 
 export interface FiringLog {
   id: string;
   scheduleName: string;
   date: string;
-  predictedDuration: number; // Minutes (Includes calibration factor at the time)
-  theoreticalDuration?: number; // Minutes (Pure physics calculation, no factor)
+  predictedDuration: number; // Minutes
+  theoreticalDuration?: number; // Minutes
   actualDuration: number; // Minutes
+  clayWeight?: number; // Weight of clay in kg
   notes: string;
   outcome: 'perfect' | 'underfired' | 'overfired' | 'error' | 'failure';
 }

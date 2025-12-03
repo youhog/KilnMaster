@@ -12,10 +12,13 @@ interface Props {
 const ScheduleEditor: React.FC<Props> = ({ onStartFiring, calibrationFactor, isDarkMode = false }) => {
   const [segments, setSegments] = useState<FiringSegment[]>([createEmptySegment()]);
   const [name, setName] = useState('新排程');
+  const [clayWeight, setClayWeight] = useState<number>(0);
 
   // Use shared helper for consistency
   const rawMinutes = calculateTheoreticalDuration(segments);
-  const adjustedMinutes = Math.round(rawMinutes * calibrationFactor);
+  // Base calibration + Weight compensation (approx. 1.5% per kg)
+  const weightFactor = 1 + (clayWeight * 0.015);
+  const adjustedMinutes = Math.round(rawMinutes * calibrationFactor * weightFactor);
 
   // Generate chart data
   const chartData = useMemo(() => {
@@ -43,7 +46,8 @@ const ScheduleEditor: React.FC<Props> = ({ onStartFiring, calibrationFactor, isD
       id: crypto.randomUUID(),
       name,
       segments,
-      estimatedDurationMinutes: adjustedMinutes
+      estimatedDurationMinutes: adjustedMinutes,
+      clayWeight
     });
   };
 
@@ -70,6 +74,39 @@ const ScheduleEditor: React.FC<Props> = ({ onStartFiring, calibrationFactor, isD
             </div>
 
             <div className="space-y-4 mb-6">
+              {/* Global Settings */}
+              <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-100 dark:border-blue-800 mb-4">
+                <h3 className="text-xs font-bold text-blue-600 dark:text-blue-400 uppercase mb-2">全域設定</h3>
+                <div className="flex items-center gap-4">
+                   <div className="flex-1">
+                      <label className="block text-xs font-semibold text-stone-500 dark:text-stone-400 mb-1">預估陶土總重 (kg)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.5"
+                        value={clayWeight}
+                        onChange={(e) => setClayWeight(Math.max(0, Number(e.target.value)))}
+                        className="w-full p-2 rounded border border-stone-300 dark:border-stone-600 bg-white dark:bg-stone-800 text-stone-900 dark:text-stone-100 text-sm focus:ring-1 focus:ring-clay-500 focus:outline-none"
+                        placeholder="0.0"
+                      />
+                      <p className="text-[10px] text-stone-400 mt-1">重量將影響預估燒製時間 (+1.5%/kg)</p>
+                   </div>
+                </div>
+                
+                {/* Weight Calculation Info */}
+                <div className="mt-3 text-[10px] text-stone-500 dark:text-stone-400 bg-white dark:bg-stone-800 p-3 rounded border border-stone-200 dark:border-stone-700">
+                  <p className="font-bold mb-1 text-stone-600 dark:text-stone-300">時間估算公式：</p>
+                  <div className="font-mono bg-stone-100 dark:bg-stone-900 p-1 rounded mb-2 text-center text-stone-600 dark:text-stone-400">
+                    理論時間 × 歷史校正 × (1 + 重量 × 1.5%)
+                  </div>
+                  <p>
+                    • <span className="font-semibold">理論時間：</span>依據升溫速率與持溫時間計算的物理基礎時間。<br/>
+                    • <span className="font-semibold">歷史校正：</span>根據過去燒製紀錄自動調整的偏差係數。<br/>
+                    • <span className="font-semibold">重量補償：</span>每增加 1kg 陶土，因熱容增加，燒製時間約延長 1.5%。此參數將隨歷史數據累積自動優化。
+                  </p>
+                </div>
+              </div>
+
               {segments.map((seg, idx) => (
                 <div key={seg.id} className="flex flex-wrap md:flex-nowrap items-end gap-3 p-4 bg-stone-50 dark:bg-stone-800/50 rounded-lg border border-stone-200 dark:border-stone-700 transition-colors">
                   <div className="w-8 font-bold text-stone-400 text-sm pt-3">#{idx + 1}</div>
@@ -200,7 +237,13 @@ const ScheduleEditor: React.FC<Props> = ({ onStartFiring, calibrationFactor, isD
             </div>
             {calibrationFactor !== 1 && (
               <div className="text-xs text-yellow-400 mt-2 bg-yellow-400/10 p-2 rounded">
-                *已包含 {Math.round((calibrationFactor - 1) * 100)}% 的歷史數據校正
+                *已包含 {Math.round((calibrationFactor - 1) * 100)}% 歷史校正
+                {clayWeight > 0 && ` + ${Math.round(clayWeight * 1.5)}% 重量補償`}
+              </div>
+            )}
+            {calibrationFactor === 1 && clayWeight > 0 && (
+               <div className="text-xs text-yellow-400 mt-2 bg-yellow-400/10 p-2 rounded">
+                *已包含 {Math.round(clayWeight * 1.5)}% 重量補償
               </div>
             )}
           </div>
