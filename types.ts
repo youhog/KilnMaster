@@ -1,4 +1,3 @@
-
 export interface FiringSegment {
   id: string;
   type: 'ramp' | 'hold';
@@ -32,6 +31,14 @@ export interface CalibrationResult {
   advice: string;
 }
 
+// [新增] Webhook 設定介面
+export interface WebhookConfig {
+  id: string;
+  name: string;
+  url: string;
+  enabled: boolean;
+}
+
 export const outcomeMap: Record<string, string> = {
   'perfect': '完美',
   'underfired': '溫度不足',
@@ -40,7 +47,6 @@ export const outcomeMap: Record<string, string> = {
   'failure': '失敗'
 };
 
-// Helper to create empty segments
 export const createEmptySegment = (): FiringSegment => ({
   id: crypto.randomUUID(),
   type: 'ramp',
@@ -49,36 +55,27 @@ export const createEmptySegment = (): FiringSegment => ({
   holdTime: 0,
 });
 
-// Calculate theoretical duration based on physics (rate and hold time)
 export const calculateTheoreticalDuration = (segments: FiringSegment[]): number => {
   let totalMinutes = 0;
-  let currentTemp = 25; // Start at ambient temperature
+  let currentTemp = 25;
 
   segments.forEach(seg => {
     if (seg.type === 'ramp') {
       const rate = seg.rate ?? 0;
       const target = seg.targetTemp;
-      
-      // Calculate ramp duration
       if (rate > 0) {
         const tempDiff = Math.abs(target - currentTemp);
-        const durationMinutes = (tempDiff / rate) * 60;
-        totalMinutes += durationMinutes;
+        totalMinutes += (tempDiff / rate) * 60;
       }
-      
-      // Update current temp to target
       currentTemp = target;
     } else if (seg.type === 'hold') {
-      // Add hold time
-      const duration = seg.holdTime ?? 0;
-      totalMinutes += duration;
+      totalMinutes += seg.holdTime ?? 0;
     }
   });
 
   return Math.round(totalMinutes);
 };
 
-// Helper to calculate temperature points for charting
 export const calculateSchedulePoints = (segments: FiringSegment[]) => {
   let currentTemp = 25;
   let currentTime = 0;

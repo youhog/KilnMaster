@@ -17,29 +17,32 @@
 ## Code.gs
 
 ```javascript
-// 設定工作表名稱
+// ==========================================
+// 全域設定區 (工作表名稱)
+// ==========================================
 const SHEET_LOGS = 'Logs';
 const SHEET_CALIBRATION = 'Calibration';
 const SHEET_USERS = 'Users';
-const SHEET_SETTINGS = 'Settings'; // [新增] 全域設定表
+const SHEET_SETTINGS = 'Settings';
+const SHEET_WEBHOOKS = 'Webhooks';       // Webhook 管理表
+const SHEET_ACTIVE = 'ActiveFirings';    // 雲端監控排程表
+const SHEET_TEMPLATES = 'Templates';     // [新] 模板儲存表
+
+// 機器人設定
+const BOT_NAME = "KilnMaster AI";
+const BOT_AVATAR = "https://cdn-icons-png.flaticon.com/512/3655/3655583.png";
+
+// ==========================================
+// 1. 初始化與 API 入口
+// ==========================================
 
 function setupSpreadsheet() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   
-  // 1. 設定 Logs 工作表
-  let logsSheet = ss.getSheetByName(SHEET_LOGS);
-  if (!logsSheet) {
-    logsSheet = ss.insertSheet(SHEET_LOGS);
-    logsSheet.appendRow(['ID', 'Schedule Name', 'Date', 'Predicted Duration', 'Theoretical Duration', 'Actual Duration', 'Clay Weight', 'Outcome', 'Notes']);
-  } else {
-    // 欄位補全檢查
-    const headers = logsSheet.getRange(1, 1, 1, logsSheet.getLastColumn()).getValues()[0];
-    if (headers.indexOf('Theoretical Duration') === -1) logsSheet.getRange(1, headers.length + 1).setValue('Theoretical Duration');
-    const updatedHeaders = logsSheet.getRange(1, 1, 1, logsSheet.getLastColumn()).getValues()[0];
-    if (updatedHeaders.indexOf('Clay Weight') === -1) logsSheet.getRange(1, updatedHeaders.length + 1).setValue('Clay Weight');
-  }
+  // 1. Logs
+  ensureSheet(ss, SHEET_LOGS, ['ID', 'Schedule Name', 'Date', 'Predicted Duration', 'Theoretical Duration', 'Actual Duration', 'Clay Weight', 'Outcome', 'Notes']);
 
-  // 2. 設定 Calibration 工作表
+  // 2. Calibration
   let calSheet = ss.getSheetByName(SHEET_CALIBRATION);
   if (!calSheet) {
     calSheet = ss.insertSheet(SHEET_CALIBRATION);
@@ -47,30 +50,49 @@ function setupSpreadsheet() {
     calSheet.appendRow([1.0, '初始設定', new Date()]);
   }
 
-  // 3. 設定 Users 工作表
+  // 3. Users
   let userSheet = ss.getSheetByName(SHEET_USERS);
   if (!userSheet) {
     userSheet = ss.insertSheet(SHEET_USERS);
     userSheet.appendRow(['Username', 'PasswordHash']); 
-    // 預設 admin 帳號
+    // 預設 Admin: admin / admin (hash)
     userSheet.appendRow(['admin', 'a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3']);
   }
 
-  // 4. [新增] 設定 Settings 全域設定表
-  let settingsSheet = ss.getSheetByName(SHEET_SETTINGS);
-  if (!settingsSheet) {
-    settingsSheet = ss.insertSheet(SHEET_SETTINGS);
-    settingsSheet.appendRow(['Key', 'Value']); // 標題
-    settingsSheet.appendRow(['DiscordWebhook', '']); // 預設空值
+  // 4. Settings
+  ensureSheet(ss, SHEET_SETTINGS, ['Key', 'Value']);
+
+  // 5. ActiveFirings (雲端監控)
+  ensureSheet(ss, SHEET_ACTIVE, ['ID', 'ScheduleJson', 'StartTime', 'LastNotified', 'TotalDuration', 'Name']);
+
+  // 6. Webhooks (多頻道管理)
+  let whSheet = ss.getSheetByName(SHEET_WEBHOOKS);
+  if (!whSheet) {
+    whSheet = ss.insertSheet(SHEET_WEBHOOKS);
+    whSheet.appendRow(['Name', 'URL', 'Enabled']);
+    whSheet.appendRow(['預設頻道', '', 'TRUE']); 
+  }
+
+  // 7. Templates (模板儲存)
+  ensureSheet(ss, SHEET_TEMPLATES, ['Name', 'SegmentsJSON', 'LastUpdated']);
+}
+
+function ensureSheet(ss, name, headers) {
+  if (!ss.getSheetByName(name)) {
+    let sheet = ss.insertSheet(name);
+    sheet.appendRow(headers);
   }
 }
 
-// [工具頁面]
 function doGet(e) {
   const action = e.parameter.action;
   if (!action || action === 'hash') return getHashToolHtml();
   if (action === 'getData') return getCloudData();
-  return responseJSON({ status: 'success', message: 'KilnMaster AI API is running' });
+  if (action === 'getWebhooks') return getWebhooks();
+  if (action === 'getSettings') return getSettings(); // [新] 讀取全域設定(如網址)
+  if (action === 'getTemplates') return getTemplates();
+  
+  return responseJSON({ status: 'success', message: 'KilnMaster AI Cloud is running' });
 }
 
 function doPost(e) {
@@ -78,22 +100,24 @@ function doPost(e) {
     const data = JSON.parse(e.postData.contents);
     const action = data.action;
 
+    // 帳號與紀錄
     if (action === 'login') return handleLogin(data.username, data.password);
-    
-    if (action === 'saveLog') {
-      if (!isValidLog(data.payload)) return responseJSON({ status: 'error', message: 'Invalid log data' });
-      return saveLog(data.payload);
-    }
-
+    if (action === 'saveLog') return saveLog(data.payload);
     if (action === 'saveCalibration') return saveCalibration(data.payload);
+    
+    // 模板
+    if (action === 'saveTemplate') return saveTemplate(data.name, data.segments);
+    
+    // 設定與 Webhook
+    if (action === 'saveSettings') return saveGlobalSettings(data.key || 'DiscordWebhook', data.value || data.webhook);
+    if (action === 'saveWebhooks') return saveWebhooks(data.webhooks);
 
-    // [修改] 儲存設定改為全域
-    if (action === 'saveSettings') {
-      // 這裡 username 參數雖然會傳進來，但我們選擇忽略它，直接存到全域
-      return saveGlobalSettings('DiscordWebhook', data.webhook);
-    }
+    // 雲端監控控制
+    if (action === 'startMonitor') return startCloudMonitor(data.payload);
+    if (action === 'stopMonitor') return stopCloudMonitor(data.payload);
 
-    if (action === 'sendDiscord') return sendDiscord(data.url, data.message);
+    // 直接發送
+    if (action === 'sendDiscord') return broadcastDiscord(data.message);
 
     return responseJSON({ status: 'error', message: 'Invalid action' });
 
@@ -102,80 +126,405 @@ function doPost(e) {
   }
 }
 
-// --- Handlers ---
+// ==========================================
+// 2. 雲端監控核心 (觸發器每 5 分鐘執行)
+// ==========================================
 
-function handleLogin(username, passwordHash) {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_USERS);
+function monitorFirings() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_ACTIVE);
+  if (!sheet || sheet.getLastRow() < 2) return;
+
   const data = sheet.getDataRange().getValues();
+  const now = Date.now();
   
+  // 讀取全域設定中的網站連結
+  const websiteUrl = getGlobalSetting('WebsiteURL');
+
+  // 從第 2 列開始 (跳過標題)
   for (let i = 1; i < data.length; i++) {
-    if (data[i][0] == username && data[i][1] == passwordHash) {
-      // [修改] 登入成功時，讀取全域 Webhook 設定
-      const webhook = getGlobalSetting('DiscordWebhook');
-      return responseJSON({ status: 'success', webhook: webhook });
+    const row = data[i];
+    const id = row[0];
+    if (!id) continue;
+
+    const schedule = JSON.parse(row[1]);
+    const startTime = Number(row[2]);
+    let lastNotified = Number(row[3]) || 0;
+    const totalDurationMins = Number(row[4]);
+    const name = row[5];
+
+    const elapsedMs = now - startTime;
+    const progress = (elapsedMs / (totalDurationMins * 60 * 1000)) * 100;
+    const currentTemp = calculateTemperature(schedule, elapsedMs);
+    const remainingMs = (totalDurationMins * 60 * 1000) - elapsedMs;
+
+    let embed = null;
+    let newNotifiedVal = lastNotified;
+
+    // 1. 進度檢查 (50%, 75%, 90%)
+    const thresholds = [50, 75, 90];
+    for (const t of thresholds) {
+      if (progress >= t && lastNotified < t) {
+        embed = {
+          title: `🔥 燒製進度報告：${t}%`,
+          url: websiteUrl, // 加入連結
+          color: 16753920, // Orange
+          fields: [
+            { name: "排程名稱", value: name, inline: true },
+            { name: "目前估溫", value: `${currentTemp}°C`, inline: true },
+            { name: "已用時間", value: formatTime(elapsedMs), inline: true },
+            { name: "剩餘時間", value: formatTime(Math.max(0, remainingMs)), inline: true }
+          ],
+          footer: { text: "KilnMaster Cloud Monitor" },
+          timestamp: new Date().toISOString()
+        };
+        newNotifiedVal = t;
+      }
+    }
+
+    // 2. 即將完成通知 (剩 15 分鐘)
+    if (remainingMs > 0 && remainingMs <= 15 * 60 * 1000 && lastNotified < 95) {
+      embed = {
+        title: "⏰ 即將完成提醒",
+        url: websiteUrl, // 加入連結
+        description: "燒製行程預計在 15 分鐘內結束，請準備前往查看。",
+        color: 16776960, // Yellow
+        fields: [
+          { name: "排程名稱", value: name, inline: true },
+          { name: "目前估溫", value: `${currentTemp}°C`, inline: true }
+        ],
+        timestamp: new Date().toISOString()
+      };
+      newNotifiedVal = 99;
+    }
+
+    // 3. 超時通知 (超過預定時間 10 分鐘)
+    if (remainingMs < -10 * 60 * 1000 && lastNotified < 100) {
+       embed = {
+        title: "✅ 預定時間已到",
+        url: websiteUrl, // 加入連結
+        description: "根據排程設定，燒製應已結束。請檢查電窯並在網頁紀錄結果。",
+        color: 65280, // Green
+        fields: [
+          { name: "排程名稱", value: name },
+          { name: "總時長", value: formatTime(elapsedMs) }
+        ],
+        timestamp: new Date().toISOString()
+       };
+       newNotifiedVal = 100;
+    }
+
+    if (embed) {
+      broadcastEmbed(embed);
+      // 更新 LastNotified
+      sheet.getRange(i + 1, 4).setValue(newNotifiedVal);
     }
   }
-  return responseJSON({ status: 'error', message: 'Invalid credentials' });
 }
 
-// [新增] 讀取全域設定
+// 啟動監控
+function startCloudMonitor(payload) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_ACTIVE);
+  const { id, schedule, startTime } = payload;
+  
+  const scheduleJson = JSON.stringify(schedule);
+  const totalDurationMins = schedule.estimatedDurationMinutes;
+  
+  // 寫入 ActiveFirings
+  sheet.appendRow([
+    id, 
+    scheduleJson, 
+    startTime, 
+    0, // LastNotified
+    totalDurationMins,
+    schedule.name
+  ]);
+  
+  // 計算預計結束時間
+  const endTime = new Date(startTime + totalDurationMins * 60 * 1000);
+  const endTimeStr = Utilities.formatDate(endTime, Session.getScriptTimeZone(), "HH:mm");
+  const websiteUrl = getGlobalSetting('WebsiteURL');
+
+  // 發送精美開始通知
+  const embed = {
+    title: "🚀 燒製排程已啟動",
+    url: websiteUrl, // 加入連結
+    description: "雲端監控已連線，系統將定時回報進度。",
+    color: 3066993, // Green/Blue
+    fields: [
+      { name: "排程名稱", value: schedule.name, inline: false },
+      { name: "預估總時長", value: `${Math.floor(totalDurationMins / 60)}小時 ${totalDurationMins % 60}分`, inline: true },
+      { name: "預計結束", value: `今日 ${endTimeStr}`, inline: true },
+      { name: "陶土重量", value: `${schedule.clayWeight || 0} kg`, inline: true }
+    ],
+    footer: { text: "即使網頁關閉，監控仍會持續運作" },
+    timestamp: new Date().toISOString()
+  };
+  
+  broadcastEmbed(embed);
+  return responseJSON({ status: 'success' });
+}
+
+// 停止監控
+function stopCloudMonitor(payload) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_ACTIVE);
+  const id = payload.id;
+  
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0] == id) {
+      sheet.deleteRow(i + 1);
+      // 可選擇是否發送停止通知
+      return responseJSON({ status: 'success' });
+    }
+  }
+  return responseJSON({ status: 'success', message: 'ID not found but processed' });
+}
+
+// ==========================================
+// 3. 模板儲存實作
+// ==========================================
+
+function saveTemplate(name, segments) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(SHEET_TEMPLATES);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_TEMPLATES);
+    sheet.appendRow(['Name', 'SegmentsJSON', 'LastUpdated']);
+  }
+
+  const data = sheet.getDataRange().getValues();
+  const jsonStr = JSON.stringify(segments);
+  const timestamp = new Date();
+
+  // 1. 檢查是否已存在 (更新)
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0] === name) {
+      sheet.getRange(i + 1, 2).setValue(jsonStr);
+      sheet.getRange(i + 1, 3).setValue(timestamp);
+      return responseJSON({ status: 'success', message: 'Updated' });
+    }
+  }
+
+  // 2. 不存在則新增
+  sheet.appendRow([name, jsonStr, timestamp]);
+  return responseJSON({ status: 'success', message: 'Created' });
+}
+
+function getTemplates() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_TEMPLATES);
+  if (!sheet) return responseJSON({ status: 'success', data: [] });
+  
+  const data = sheet.getDataRange().getValues();
+  const templates = [];
+  // 跳過標題
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0]) {
+      try {
+        templates.push({
+          name: data[i][0],
+          segments: JSON.parse(data[i][1])
+        });
+      } catch (e) {
+        // ignore invalid json
+      }
+    }
+  }
+  return responseJSON({ status: 'success', data: templates });
+}
+
+// ==========================================
+// 4. Webhook 廣播系統
+// ==========================================
+
+function getWebhooks() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_WEBHOOKS);
+  if (!sheet) return responseJSON({ status: 'success', data: [] });
+  const data = sheet.getDataRange().getValues();
+  const webhooks = [];
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][1]) {
+      webhooks.push({ name: data[i][0], url: data[i][1], enabled: data[i][2] === true || data[i][2] === 'TRUE' });
+    }
+  }
+  return responseJSON({ status: 'success', data: webhooks });
+}
+
+function saveWebhooks(webhookList) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(SHEET_WEBHOOKS);
+  if (!sheet) sheet = ss.insertSheet(SHEET_WEBHOOKS);
+  
+  if (sheet.getLastRow() > 1) sheet.getRange(2, 1, sheet.getLastRow() - 1, 3).clearContent();
+  
+  if (webhookList && webhookList.length > 0) {
+    const rows = webhookList.map(wh => [wh.name, wh.url, wh.enabled]);
+    sheet.getRange(2, 1, rows.length, 3).setValues(rows);
+  }
+  return responseJSON({ status: 'success' });
+}
+
+function broadcastEmbed(embedObject) {
+  return sendToAllWebhooks({
+    username: BOT_NAME,
+    avatar_url: BOT_AVATAR,
+    embeds: [embedObject]
+  });
+}
+
+function broadcastDiscord(message) {
+  return sendToAllWebhooks({ content: message });
+}
+
+function sendToAllWebhooks(payloadObj) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_WEBHOOKS);
+  if (!sheet) return responseJSON({ status: 'error', message: 'No Webhook Config' });
+  
+  const data = sheet.getDataRange().getValues();
+  const requests = [];
+  
+  for (let i = 1; i < data.length; i++) {
+    const url = data[i][1];
+    const enabled = data[i][2] === true || data[i][2] === 'TRUE';
+    if (url && enabled) {
+      requests.push({
+        url: url, 
+        method: 'post', 
+        contentType: 'application/json',
+        payload: JSON.stringify(payloadObj), 
+        muteHttpExceptions: true
+      });
+    }
+  }
+
+  if (requests.length > 0) {
+    try {
+      UrlFetchApp.fetchAll(requests);
+    } catch (e) {
+      Logger.log("Broadcast Error: " + e.toString());
+    }
+  }
+  return responseJSON({ status: 'success' });
+}
+
+// ==========================================
+// 5. 輔助函式
+// ==========================================
+
 function getGlobalSetting(key) {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_SETTINGS);
   if (!sheet) return '';
   const data = sheet.getDataRange().getValues();
-  
-  // 從第2列開始搜尋 (跳過標題)
   for (let i = 1; i < data.length; i++) {
-    if (data[i][0] === key) {
-      return data[i][1];
-    }
+    if (data[i][0] === key) return data[i][1];
   }
   return '';
 }
 
-// [新增] 儲存全域設定
+function getSettings() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_SETTINGS);
+  const settings = {};
+  if (sheet) {
+    const data = sheet.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      if(data[i][0]) settings[data[i][0]] = data[i][1];
+    }
+  }
+  return responseJSON({ status: 'success', data: settings });
+}
+
 function saveGlobalSettings(key, value) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let sheet = ss.getSheetByName(SHEET_SETTINGS);
-  
-  // 確保工作表存在
   if (!sheet) {
-    setupSpreadsheet();
-    sheet = ss.getSheetByName(SHEET_SETTINGS);
+    sheet = ss.insertSheet(SHEET_SETTINGS);
+    sheet.appendRow(['Key', 'Value']);
   }
 
   const data = sheet.getDataRange().getValues();
-  
-  // 1. 嘗試尋找現有 Key 更新
   for (let i = 1; i < data.length; i++) {
     if (data[i][0] === key) {
       sheet.getRange(i + 1, 2).setValue(value);
       return responseJSON({ status: 'success' });
     }
   }
-
-  // 2. 如果沒找到，新增一行
   sheet.appendRow([key, value]);
   return responseJSON({ status: 'success' });
+}
+
+function calculateTemperature(schedule, elapsedMs) {
+  const elapsedMinutes = elapsedMs / 60000;
+  let currentT = 25; 
+  let timeAccumulator = 0;
+
+  for (const seg of schedule.segments) {
+    let segDuration = 0;
+    if (seg.type === 'hold') {
+      segDuration = seg.holdTime;
+    } else {
+      segDuration = (Math.abs(seg.targetTemp - currentT) / seg.rate) * 60;
+    }
+
+    if (timeAccumulator + segDuration > elapsedMinutes) {
+      const timeInSeg = elapsedMinutes - timeAccumulator;
+      if (seg.type === 'hold') return seg.targetTemp;
+      const fraction = timeInSeg / segDuration;
+      return Math.round(currentT + ((seg.targetTemp - currentT) * fraction));
+    }
+    
+    if (seg.type === 'ramp') currentT = seg.targetTemp;
+    timeAccumulator += segDuration;
+  }
+  return currentT;
+}
+
+function formatTime(ms) {
+  const totalSeconds = Math.floor(ms / 1000);
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  return `${h}時${m}分`;
+}
+
+function responseJSON(data) {
+  return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(ContentService.MimeType.JSON);
+}
+
+function handleLogin(username, passwordHash) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_USERS);
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0] == username && data[i][1] == passwordHash) {
+      return responseJSON({ status: 'success' });
+    }
+  }
+  return responseJSON({ status: 'error' });
 }
 
 function getCloudData() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const logsSheet = ss.getSheetByName(SHEET_LOGS);
   const calSheet = ss.getSheetByName(SHEET_CALIBRATION);
+  
   const logsData = logsSheet.getDataRange().getValues();
-  const headers = logsData[0];
   const logs = [];
   const colMap = {};
-  headers.forEach((h, i) => colMap[h] = i);
+  logsData[0].forEach((h, i) => colMap[h] = i);
+  
   for (let i = 1; i < logsData.length; i++) {
     const row = logsData[i];
     if (row[colMap['Date']]) {
       logs.push({
-        id: row[colMap['ID']], scheduleName: row[colMap['Schedule Name']], date: row[colMap['Date']],
-        predictedDuration: Number(row[colMap['Predicted Duration']]), theoreticalDuration: Number(row[colMap['Theoretical Duration']]||0),
-        actualDuration: Number(row[colMap['Actual Duration']]), clayWeight: Number(row[colMap['Clay Weight']]||0),
-        outcome: row[colMap['Outcome']], notes: row[colMap['Notes']]
+        id: row[colMap['ID']], 
+        scheduleName: row[colMap['Schedule Name']], 
+        date: row[colMap['Date']],
+        predictedDuration: Number(row[colMap['Predicted Duration']]), 
+        theoreticalDuration: Number(row[colMap['Theoretical Duration']]||0),
+        actualDuration: Number(row[colMap['Actual Duration']]), 
+        clayWeight: Number(row[colMap['Clay Weight']]||0),
+        outcome: row[colMap['Outcome']], 
+        notes: row[colMap['Notes']]
       });
     }
   }
@@ -191,10 +540,15 @@ function saveLog(log) {
   const colMap = {};
   headers.forEach((h, i) => colMap[h] = i);
   const newRow = new Array(headers.length).fill('');
-  newRow[colMap['ID']] = log.id; newRow[colMap['Schedule Name']] = log.scheduleName; newRow[colMap['Date']] = log.date;
-  newRow[colMap['Predicted Duration']] = log.predictedDuration; newRow[colMap['Theoretical Duration']] = log.theoreticalDuration || '';
-  newRow[colMap['Actual Duration']] = log.actualDuration; newRow[colMap['Clay Weight']] = log.clayWeight || 0;
-  newRow[colMap['Outcome']] = log.outcome; newRow[colMap['Notes']] = log.notes;
+  newRow[colMap['ID']] = log.id; 
+  newRow[colMap['Schedule Name']] = log.scheduleName; 
+  newRow[colMap['Date']] = log.date;
+  newRow[colMap['Predicted Duration']] = log.predictedDuration; 
+  newRow[colMap['Theoretical Duration']] = log.theoreticalDuration || '';
+  newRow[colMap['Actual Duration']] = log.actualDuration; 
+  newRow[colMap['Clay Weight']] = log.clayWeight || 0;
+  newRow[colMap['Outcome']] = log.outcome; 
+  newRow[colMap['Notes']] = log.notes;
   sheet.appendRow(newRow);
   return responseJSON({ status: 'success' });
 }
@@ -205,33 +559,8 @@ function saveCalibration(cal) {
   return responseJSON({ status: 'success' });
 }
 
-function sendDiscord(webhookUrl, message) {
-  try {
-    UrlFetchApp.fetch(webhookUrl, {
-      method: 'post', contentType: 'application/json', muteHttpExceptions: true,
-      payload: JSON.stringify({ content: message })
-    });
-    return responseJSON({ status: 'success' });
-  } catch (e) { return responseJSON({ status: 'error', message: e.toString() }); }
-}
-
 function getHashToolHtml() {
-  const html = `
-    <!DOCTYPE html>
-    <html>
-    <head><base target="_top"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>KilnMaster 密碼工具</title>
-    <style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:20px;background-color:#f5f5f4;color:#1c1917;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}.card{background:white;padding:2rem;border-radius:1rem;box-shadow:0 10px 15px -3px rgb(0 0 0/0.1);width:100%;max-width:480px}h2{margin-top:0;color:#44403c}input{width:100%;padding:12px;margin:8px 0 20px 0;border:1px solid #d6d3d1;border-radius:8px;box-sizing:border-box}button{background-color:#b0776b;color:white;border:none;padding:12px 20px;border-radius:8px;cursor:pointer;width:100%;font-weight:bold}.result{background:#292524;color:#e7e5e4;padding:12px;border-radius:8px;word-break:break-all;font-family:monospace;margin-top:20px;display:none}</style>
-    </head><body><div class="card"><h2>🔐 密碼雜湊產生器</h2><input type="text" id="password" placeholder="輸入密碼"><button onclick="g()">產生 Hash</button><div id="o" class="result"></div></div>
-    <script>async function g(){const p=document.getElementById('password').value;if(!p)return;const d=new TextEncoder().encode(p);const h=await crypto.subtle.digest('SHA-256',d);const x=Array.from(new Uint8Array(h)).map(b=>b.toString(16).padStart(2,'0')).join('');const o=document.getElementById('o');o.style.display='block';o.innerText=x;navigator.clipboard.writeText(x);}</script>
-    </body></html>`;
+  const html = `<!DOCTYPE html><html><head><base target="_top"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>KilnMaster Password</title><style>body{font-family:sans-serif;padding:20px;background:#f5f5f4;display:flex;justify-content:center}div{background:white;padding:2rem;border-radius:1rem;box-shadow:0 4px 6px -1px rgb(0 0 0/0.1)}input{width:100%;padding:10px;margin:10px 0;border:1px solid #ccc;border-radius:4px}button{width:100%;padding:10px;background:#b0776b;color:white;border:none;border-radius:4px;cursor:pointer}div.r{margin-top:20px;background:#333;color:#fff;padding:10px;border-radius:4px;word-break:break-all;font-family:monospace}</style></head><body><div><h2>密碼雜湊工具</h2><input id="p" placeholder="Password"><button onclick="g()">Generate</button><div id="o" class="r" style="display:none"></div></div><script>async function g(){const p=document.getElementById('p').value;if(!p)return;const d=new TextEncoder().encode(p);const h=await crypto.subtle.digest('SHA-256',d);const x=Array.from(new Uint8Array(h)).map(b=>b.toString(16).padStart(2,'0')).join('');const o=document.getElementById('o');o.style.display='block';o.innerText=x;}</script></body></html>`;
   return HtmlService.createHtmlOutput(html).setTitle('KilnMaster Password').addMetaTag('viewport', 'width=device-width, initial-scale=1');
-}
-
-function isValidLog(log) {
-  return log && log.scheduleName && log.date && typeof log.actualDuration === 'number';
-}
-
-function responseJSON(data) {
-  return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(ContentService.MimeType.JSON);
 }
 ```

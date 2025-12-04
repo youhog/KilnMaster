@@ -1,8 +1,8 @@
 import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { FiringSchedule, calculateSchedulePoints, FiringLog } from '../types';
-import { Bell, BellOff, XCircle, CheckCircle, Thermometer, Settings, Plus, Trash2, Zap, ZapOff, MessageSquare } from 'lucide-react';
+import { XCircle, CheckCircle, Thermometer, Zap, ZapOff, Cloud, Loader2 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, ReferenceDot } from 'recharts';
-import { sendDiscordMessage } from '../services/sheetService';
+import { sendDiscordMessage, startCloudMonitor, stopCloudMonitor } from '../services/sheetService';
 
 interface Props {
   schedule: FiringSchedule;
@@ -14,165 +14,116 @@ interface Props {
 
 const ActiveFiring: React.FC<Props> = ({ schedule, startTime, onFinish, onCancel, isDarkMode = false }) => {
   const [elapsed, setElapsed] = useState(0);
-  const [notificationsEnabled, setNotificationsEnabled] = useState(Notification.permission === 'granted');
   const [showFinishModal, setShowFinishModal] = useState(false);
   const [notes, setNotes] = useState('');
   const [outcome, setOutcome] = useState<FiringLog['outcome']>('perfect');
-  
-  // Wake Lock State
   const [wakeLockActive, setWakeLockActive] = useState(false);
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
 
-  // Notification & Discord Settings
-  const [showSettings, setShowSettings] = useState(false);
-  const [thresholds, setThresholds] = useState<number[]>([50, 75, 90]);
-  const [newThreshold, setNewThreshold] = useState('');
-  const [discordUrl, setDiscordUrl] = useState(() => localStorage.getItem('kiln_discord_webhook') || '');
-  
-  // Track fired notifications
-  const firedThresholdsRef = useRef<Set<number>>(new Set());
-  const fired15MinRef = useRef(false);
-  
-  const totalEstimatedMs = schedule.estimatedDurationMinutes * 60 * 1000;
-  
-  // 取得 Script URL 用於發送 Discord
+  // [新增] 狀態：防止按鈕重複提交
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
   const scriptUrl = localStorage.getItem('kiln_script_url') || '';
-  
-  // --- Wake Lock Logic ---
+  const hasStartedMonitor = useRef(false);
+
+  // 1. 啟動雲端監控 (Mount 時執行一次)
+  useEffect(() => {
+    if (scriptUrl && !hasStartedMonitor.current) {
+      startCloudMonitor(scriptUrl, schedule, startTime);
+      hasStartedMonitor.current = true;
+    }
+  }, [scriptUrl, schedule, startTime]);
+
+  // 2. 本地計時 (僅更新 UI)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      setElapsed(now - startTime);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [startTime]);
+
+  // Wake Lock
   useEffect(() => {
     const requestWakeLock = async () => {
       try {
         if ('wakeLock' in navigator) {
           wakeLockRef.current = await navigator.wakeLock.request('screen');
           setWakeLockActive(true);
-          console.log('Wake Lock is active');
-          
-          wakeLockRef.current.addEventListener('release', () => {
-            setWakeLockActive(false);
-            console.log('Wake Lock released');
-          });
         }
-      } catch (err) {
-        console.error('Wake Lock request failed:', err);
-      }
+      } catch (err) { console.error(err); }
     };
-
     requestWakeLock();
-
-    const handleVisibilityChange = () => {
-      if (wakeLockRef.current !== null && document.visibilityState === 'visible') {
-        requestWakeLock();
-      }
-    };
-
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      if (wakeLockRef.current) {
-        wakeLockRef.current.release().catch(console.error);
-      }
-    };
+    return () => { if (wakeLockRef.current) wakeLockRef.current.release(); };
   }, []);
 
-  // --- Temperature Calculation ---
   const getCurrentTemp = (elapsedMs: number) => {
     const elapsedMinutes = elapsedMs / 60000;
     let currentT = 25;
     let timeAccumulator = 0;
-
     for (const seg of schedule.segments) {
-      const segDuration = seg.type === 'hold' 
-        ? seg.holdTime! 
-        : (Math.abs(seg.targetTemp - currentT) / seg.rate!) * 60;
-
+      const segDuration = seg.type === 'hold' ? seg.holdTime! : (Math.abs(seg.targetTemp - currentT) / seg.rate!) * 60;
       if (timeAccumulator + segDuration > elapsedMinutes) {
         const timeInSeg = elapsedMinutes - timeAccumulator;
         if (seg.type === 'hold') return seg.targetTemp;
-        
         const fraction = timeInSeg / segDuration;
-        const tempDiff = seg.targetTemp - currentT;
-        return Math.round(currentT + (tempDiff * fraction));
+        return Math.round(currentT + ((seg.targetTemp - currentT) * fraction));
       }
-      
-      if (seg.type === 'ramp') {
-        currentT = seg.targetTemp;
-      }
+      if (seg.type === 'ramp') currentT = seg.targetTemp;
       timeAccumulator += segDuration;
     }
     return currentT;
   };
 
-  // --- Main Interval Loop ---
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const now = Date.now();
-      const diff = now - startTime;
-      setElapsed(diff);
-      
-      const currentProgress = (diff / totalEstimatedMs) * 100;
-      const remainingMs = totalEstimatedMs - diff;
-      const fifteenMinsMs = 15 * 60 * 1000;
+  const handleComplete = async () => {
+    if (isSubmitting) return; // 防止重複
+    setIsSubmitting(true);
 
-      if (remainingMs > 0 && remainingMs <= fifteenMinsMs && !fired15MinRef.current) {
-         const msg = `🔥 KilnMaster 提醒：${schedule.name} 燒製即將完成（約剩餘 15 分鐘）。`;
-         if (notificationsEnabled) new Notification("KilnMaster 通知", { body: msg });
-         if (discordUrl) sendDiscordMessage(scriptUrl, discordUrl, msg);
-         fired15MinRef.current = true;
-      }
-
-      thresholds.forEach(t => {
-          if (currentProgress >= t && !firedThresholdsRef.current.has(t)) {
-              const temp = getCurrentTemp(diff);
-              const msg = `🌡️ KilnMaster 進度：${schedule.name} 已達 ${t}% (目前溫度約 ${temp}°C)`;
-              if (notificationsEnabled) new Notification("KilnMaster 進度通知", { body: msg });
-              if (discordUrl) sendDiscordMessage(scriptUrl, discordUrl, msg);
-              firedThresholdsRef.current.add(t);
-          }
-      });
-
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [startTime, totalEstimatedMs, notificationsEnabled, thresholds, discordUrl, schedule.name, scriptUrl]);
-
-  // --- Handlers ---
-  const requestNotification = () => {
-    if (!("Notification" in window)) {
-      alert("此瀏覽器不支援桌面通知");
-    } else if (Notification.permission === "granted") {
-      setNotificationsEnabled(true);
-    } else if (Notification.permission !== "denied") {
-      Notification.requestPermission().then((permission) => {
-        if (permission === "granted") {
-          setNotificationsEnabled(true);
+    try {
+        const msg = `✅ **燒製完成**：${schedule.name}\n使用者已在網頁紀錄結果：${outcome}`;
+        if (scriptUrl) {
+          await sendDiscordMessage(scriptUrl, msg);
+          await stopCloudMonitor(scriptUrl, schedule.id);
         }
-      });
+        onFinish({
+            actualDuration: Math.round(elapsed / 60000),
+            outcome,
+            notes
+        });
+    } catch (e) {
+        console.error("Finish failed", e);
+        setIsSubmitting(false);
+        alert("連線錯誤，請稍後再試");
     }
   };
 
-  const handleDiscordChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-      const url = e.target.value;
-      setDiscordUrl(url);
-      localStorage.setItem('kiln_discord_webhook', url);
-  };
-
-  const handleAddThreshold = () => {
-    const val = parseInt(newThreshold);
-    if (!isNaN(val) && val > 0 && val < 100 && !thresholds.includes(val)) {
-        setThresholds([...thresholds, val]);
-        setNewThreshold('');
+  const handleCancel = async () => {
+    if (isSubmitting) return; // 防止重複
+    
+    if (confirm("確定要中止燒製嗎？")) {
+        setIsSubmitting(true);
+        try {
+            if (scriptUrl) {
+                await sendDiscordMessage(scriptUrl, `⚠️ **燒製已中止**：${schedule.name}`);
+                await stopCloudMonitor(scriptUrl, schedule.id);
+            }
+            onCancel();
+        } catch (e) {
+            console.error("Cancel failed", e);
+            setIsSubmitting(false);
+        }
     }
   };
 
-  const handleRemoveThreshold = (val: number) => {
-    setThresholds(thresholds.filter(t => t !== val));
-    firedThresholdsRef.current.delete(val);
-  };
-
-  const progress = Math.min((elapsed / totalEstimatedMs) * 100, 100);
-  const remainingMs = Math.max(0, totalEstimatedMs - elapsed);
+  const currentTemp = getCurrentTemp(elapsed);
+  const chartData = useMemo(() => {
+    const points = calculateSchedulePoints(schedule.segments);
+    return points.map(p => ({ time: Math.round((p.time / 60) * 100) / 100, temp: p.temp }));
+  }, [schedule.segments]);
   
+  const progress = Math.min((elapsed / (schedule.estimatedDurationMinutes * 60000)) * 100, 100);
+  const remainingMs = Math.max(0, (schedule.estimatedDurationMinutes * 60 * 1000) - elapsed);
+
   const formatTime = (ms: number) => {
     const totalSeconds = Math.floor(ms / 1000);
     const h = Math.floor(totalSeconds / 3600);
@@ -181,33 +132,6 @@ const ActiveFiring: React.FC<Props> = ({ schedule, startTime, onFinish, onCancel
     return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
-  const currentTemp = getCurrentTemp(elapsed);
-
-  const chartData = useMemo(() => {
-    const points = calculateSchedulePoints(schedule.segments);
-    return points.map(p => ({
-      time: Math.round((p.time / 60) * 100) / 100, 
-      temp: p.temp
-    }));
-  }, [schedule.segments]);
-
-  const currentChartPoint = {
-    time: Math.round((elapsed / 3600000) * 100) / 100,
-    temp: currentTemp
-  };
-
-  const handleComplete = () => {
-    const msg = `✅ KilnMaster：${schedule.name} 燒製已紀錄完成。結果：${outcome}`;
-    if (discordUrl) sendDiscordMessage(scriptUrl, discordUrl, msg);
-
-    onFinish({
-        actualDuration: Math.round(elapsed / 60000),
-        outcome,
-        notes
-    });
-  };
-
-  // Chart Colors
   const chartGridColor = isDarkMode ? '#44403c' : '#e5e7eb';
   const chartAxisColor = isDarkMode ? '#a8a29e' : '#9ca3af';
   const chartLineColor = isDarkMode ? '#78716c' : '#9ca3af';
@@ -226,6 +150,7 @@ const ActiveFiring: React.FC<Props> = ({ schedule, startTime, onFinish, onCancel
                         {['perfect', 'underfired', 'overfired', 'failure', 'error'].map((o) => (
                             <button
                                 key={o}
+                                disabled={isSubmitting}
                                 onClick={() => setOutcome(o as FiringLog['outcome'])}
                                 className={`p-2 rounded-lg border-2 text-sm font-bold transition-all ${
                                     outcome === o 
@@ -233,13 +158,7 @@ const ActiveFiring: React.FC<Props> = ({ schedule, startTime, onFinish, onCancel
                                     : 'border-stone-200 dark:border-stone-700 text-stone-500 dark:text-stone-400 hover:border-stone-300 dark:hover:border-stone-600'
                                 }`}
                             >
-                                {{
-                                    'perfect': '完美',
-                                    'underfired': '溫度不足',
-                                    'overfired': '過溫',
-                                    'failure': '失敗',
-                                    'error': '錯誤'
-                                }[o]}
+                                {{'perfect': '完美', 'underfired': '溫度不足', 'overfired': '過溫', 'failure': '失敗', 'error': '錯誤'}[o]}
                             </button>
                         ))}
                     </div>
@@ -250,23 +169,30 @@ const ActiveFiring: React.FC<Props> = ({ schedule, startTime, onFinish, onCancel
                     <textarea 
                         value={notes}
                         onChange={(e) => setNotes(e.target.value)}
-                        placeholder="例如：釉藥效果很好、第2層溫度偏高等..."
+                        placeholder="例如：釉藥效果很好..."
+                        disabled={isSubmitting}
                         className="w-full p-3 border border-stone-300 dark:border-stone-700 bg-white dark:bg-stone-800 text-stone-900 dark:text-stone-100 rounded-lg h-24 focus:ring-2 focus:ring-clay-500 focus:outline-none"
                     />
                 </div>
 
                 <div className="flex gap-4">
                     <button 
-                        onClick={() => setShowFinishModal(false)}
-                        className="flex-1 py-3 text-stone-500 dark:text-stone-400 hover:bg-stone-100 dark:hover:bg-stone-800 rounded-lg font-bold"
+                        onClick={() => setShowFinishModal(false)} 
+                        disabled={isSubmitting}
+                        className="flex-1 py-3 text-stone-500 hover:bg-stone-100 dark:hover:bg-stone-800 rounded-lg font-bold disabled:opacity-50"
                     >
                         取消
                     </button>
                     <button 
-                        onClick={handleComplete}
-                        className="flex-1 py-3 bg-clay-600 hover:bg-clay-700 text-white rounded-lg font-bold shadow-lg"
+                        onClick={handleComplete} 
+                        disabled={isSubmitting}
+                        className="flex-1 py-3 bg-clay-600 hover:bg-clay-700 text-white rounded-lg font-bold shadow-lg flex justify-center items-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed"
                     >
-                        儲存並通知
+                        {isSubmitting ? (
+                            <><Loader2 className="w-4 h-4 animate-spin" /> 處理中...</>
+                        ) : (
+                            "儲存並通知"
+                        )}
                     </button>
                 </div>
             </div>
@@ -285,122 +211,32 @@ const ActiveFiring: React.FC<Props> = ({ schedule, startTime, onFinish, onCancel
               {schedule.name}
               {wakeLockActive ? (
                 <span className="text-xs bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400 px-2 py-1 rounded-full flex items-center gap-1 font-normal">
-                  <Zap className="w-3 h-3" /> 螢幕恆亮中
+                  <Zap className="w-3 h-3" /> 螢幕恆亮
                 </span>
               ) : (
-                <span className="text-xs bg-stone-100 dark:bg-stone-800 text-stone-500 px-2 py-1 rounded-full flex items-center gap-1 font-normal" title="無法阻止螢幕休眠">
+                <span className="text-xs bg-stone-100 dark:bg-stone-800 text-stone-500 px-2 py-1 rounded-full flex items-center gap-1 font-normal">
                   <ZapOff className="w-3 h-3" /> 一般模式
                 </span>
               )}
             </h2>
-            <p className="text-stone-500 dark:text-stone-400">開始時間：{new Date(startTime).toLocaleTimeString()}</p>
-          </div>
-          
-          <div className="flex gap-2 self-end md:self-auto relative">
-             <button 
-              onClick={() => setShowSettings(!showSettings)}
-              className={`p-2 rounded-full transition-colors ${showSettings ? 'bg-stone-200 dark:bg-stone-700 text-stone-700 dark:text-stone-200' : 'bg-stone-100 dark:bg-stone-800 text-stone-400 dark:text-stone-500 hover:bg-stone-200 dark:hover:bg-stone-700'}`}
-              title="通知設定"
-            >
-              <Settings className="w-6 h-6" />
-            </button>
-
-            <button 
-              onClick={requestNotification}
-              className={`p-2 rounded-full transition-colors ${notificationsEnabled ? 'bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400' : 'bg-stone-100 dark:bg-stone-800 text-stone-400 dark:text-stone-500 hover:bg-stone-200 dark:hover:bg-stone-700'}`}
-              title={notificationsEnabled ? "通知已開啟" : "點擊開啟通知"}
-            >
-              {notificationsEnabled ? <Bell className="w-6 h-6" /> : <BellOff className="w-6 h-6" />}
-            </button>
-
-            {showSettings && (
-                <div className="absolute top-12 right-0 w-80 bg-white dark:bg-stone-800 rounded-xl shadow-xl border border-stone-100 dark:border-stone-700 p-4 z-20">
-                    <h3 className="text-sm font-bold text-stone-800 dark:text-stone-100 mb-3 flex items-center gap-2">
-                        <Bell className="w-4 h-4" /> 通知設定
-                    </h3>
-                    
-                    <div className="mb-4 pb-4 border-b border-stone-100 dark:border-stone-700">
-                        <label className="text-xs font-bold text-stone-500 dark:text-stone-400 uppercase mb-1 flex items-center gap-1">
-                            <MessageSquare className="w-3 h-3" /> Discord Webhook
-                        </label>
-                        <input 
-                            type="password" 
-                            value={discordUrl}
-                            onChange={handleDiscordChange}
-                            placeholder="https://discord.com/api/webhooks/..."
-                            className="w-full p-2 text-xs border border-stone-200 dark:border-stone-600 rounded bg-stone-50 dark:bg-stone-900 text-stone-800 dark:text-stone-200"
-                        />
-                    </div>
-
-                    <div className="flex gap-2 mb-4">
-                        <div className="relative flex-1">
-                            <input 
-                                type="number" 
-                                placeholder="%" 
-                                className="w-full pl-3 pr-8 py-2 text-sm border border-stone-200 dark:border-stone-600 bg-white dark:bg-stone-700 text-stone-900 dark:text-stone-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-clay-500"
-                                value={newThreshold}
-                                onChange={e => setNewThreshold(e.target.value)}
-                                min="1"
-                                max="99"
-                            />
-                            <span className="absolute right-3 top-2 text-stone-400 text-sm">%</span>
-                        </div>
-                        <button 
-                            onClick={handleAddThreshold} 
-                            disabled={!newThreshold}
-                            className="bg-clay-600 text-white p-2 rounded-lg hover:bg-clay-700 disabled:opacity-50"
-                        >
-                            <Plus className="w-4 h-4" />
-                        </button>
-                    </div>
-
-                    <div className="space-y-2 max-h-48 overflow-y-auto">
-                        <div className="text-xs text-stone-400 font-medium px-1">已設定的提醒點：</div>
-                        {thresholds.sort((a,b)=>a-b).map(t => (
-                            <div key={t} className="flex justify-between items-center bg-stone-50 dark:bg-stone-700/50 p-2 rounded-lg text-sm border border-stone-100 dark:border-stone-700">
-                                <span className="font-mono font-bold text-clay-700 dark:text-clay-300">{t}%</span>
-                                <button onClick={() => handleRemoveThreshold(t)} className="text-stone-400 hover:text-red-500 p-1">
-                                    <Trash2 className="w-4 h-4" />
-                                </button>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            )}
+            <div className="flex gap-4 text-xs text-stone-500 dark:text-stone-400 mt-1">
+                <span className="flex items-center gap-1"><Cloud className="w-3 h-3" /> 雲端監控中</span>
+                <span>開始：{new Date(startTime).toLocaleTimeString()}</span>
+            </div>
           </div>
         </div>
 
+        {/* 圖表區 */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
             <div className="flex flex-col items-center justify-center">
                 <div className="relative w-56 h-56 mb-6">
                     <svg className="w-full h-full transform -rotate-90">
-                    <circle
-                        cx="112"
-                        cy="112"
-                        r="100"
-                        stroke="currentColor"
-                        strokeWidth="12"
-                        fill="transparent"
-                        className="text-stone-100 dark:text-stone-800"
-                    />
-                    <circle
-                        cx="112"
-                        cy="112"
-                        r="100"
-                        stroke="currentColor"
-                        strokeWidth="12"
-                        fill="transparent"
-                        strokeDasharray={2 * Math.PI * 100}
-                        strokeDashoffset={2 * Math.PI * 100 * (1 - progress / 100)}
-                        className="text-clay-500 transition-all duration-1000 ease-linear"
-                        strokeLinecap="round"
-                    />
+                    <circle cx="112" cy="112" r="100" stroke="currentColor" strokeWidth="12" fill="transparent" className="text-stone-100 dark:text-stone-800" />
+                    <circle cx="112" cy="112" r="100" stroke="currentColor" strokeWidth="12" fill="transparent" strokeDasharray={2 * Math.PI * 100} strokeDashoffset={2 * Math.PI * 100 * (1 - progress / 100)} className="text-clay-500 transition-all duration-1000 ease-linear" strokeLinecap="round" />
                     </svg>
                     <div className="absolute inset-0 flex flex-col items-center justify-center">
                     <div className="text-stone-400 text-xs font-semibold uppercase tracking-wider mb-1">剩餘時間</div>
-                    <div className="text-3xl font-mono font-bold text-stone-800 dark:text-stone-100">
-                        {formatTime(remainingMs)}
-                    </div>
+                    <div className="text-3xl font-mono font-bold text-stone-800 dark:text-stone-100">{formatTime(remainingMs)}</div>
                     <div className="text-clay-600 dark:text-clay-400 font-bold mt-2 flex items-center gap-1 text-lg">
                         <Thermometer className="w-5 h-5" /> ~{Math.round(currentTemp)}°C
                     </div>
@@ -408,91 +244,37 @@ const ActiveFiring: React.FC<Props> = ({ schedule, startTime, onFinish, onCancel
                 </div>
             </div>
 
-            {/* 修改這裡：加入 inline style height 解決報錯 */}
             <div className="h-64 bg-stone-50 dark:bg-stone-800 rounded-xl border border-stone-200 dark:border-stone-700 p-2 transition-colors" style={{ height: '256px' }}>
                 <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={chartData} margin={{ top: 10, right: 10, bottom: 5, left: 0 }}>
                         <CartesianGrid strokeDasharray="3 3" stroke={chartGridColor} />
-                        <XAxis 
-                            dataKey="time" 
-                            unit="h" 
-                            fontSize={10} 
-                            stroke={chartAxisColor} 
-                            type="number" 
-                            domain={['dataMin', 'dataMax']} 
-                            tick={{ fill: chartAxisColor }}
-                        />
-                        <YAxis 
-                            unit="°C" 
-                            fontSize={10} 
-                            stroke={chartAxisColor} 
-                            width={35} 
-                            tick={{ fill: chartAxisColor }}
-                        />
-                        <Tooltip 
-                            contentStyle={{ 
-                                borderRadius: '8px', 
-                                fontSize: '12px',
-                                backgroundColor: chartTooltipBg,
-                                borderColor: chartTooltipBorder,
-                                color: isDarkMode ? '#f5f5f4' : '#1c1917'
-                            }}
-                            itemStyle={{ color: isDarkMode ? '#f5f5f4' : '#1c1917' }}
-                            formatter={(val) => [`${val}°C`, '預定溫度']}
-                            labelFormatter={(val) => `${val} 小時`}
-                        />
-                        <Line 
-                            type="monotone" 
-                            dataKey="temp" 
-                            stroke={chartLineColor} 
-                            strokeWidth={2} 
-                            dot={false} 
-                            name="預定曲線"
-                        />
-                        <ReferenceDot 
-                            x={currentChartPoint.time} 
-                            y={currentChartPoint.temp} 
-                            r={6} 
-                            fill="#b0776b" 
-                            stroke="#fff" 
-                            strokeWidth={2}
-                        />
-                        <ReferenceLine x={currentChartPoint.time} stroke="#b0776b" strokeDasharray="3 3" />
+                        <XAxis dataKey="time" unit="h" fontSize={10} stroke={chartAxisColor} type="number" domain={['dataMin', 'dataMax']} tick={{ fill: chartAxisColor }} />
+                        <YAxis unit="°C" fontSize={10} stroke={chartAxisColor} width={35} tick={{ fill: chartAxisColor }} />
+                        <Tooltip contentStyle={{ borderRadius: '8px', fontSize: '12px', backgroundColor: chartTooltipBg, borderColor: chartTooltipBorder, color: isDarkMode ? '#f5f5f4' : '#1c1917' }} itemStyle={{ color: isDarkMode ? '#f5f5f4' : '#1c1917' }} formatter={(val) => [`${val}°C`, '預定溫度']} />
+                        <Line type="monotone" dataKey="temp" stroke={chartLineColor} strokeWidth={2} dot={false} />
+                        <ReferenceDot x={Math.round((elapsed / 3600000) * 100) / 100} y={currentTemp} r={6} fill="#b0776b" stroke="#fff" strokeWidth={2} />
+                        <ReferenceLine x={Math.round((elapsed / 3600000) * 100) / 100} stroke="#b0776b" strokeDasharray="3 3" />
                     </LineChart>
                 </ResponsiveContainer>
-                <div className="text-center text-xs text-stone-400 mt-2">
-                    實心點代表目前預估進度位置
-                </div>
             </div>
         </div>
 
         <div className="grid grid-cols-2 gap-4">
-          <button
-            onClick={() => {
-                if(confirm("中止燒製？點擊「確定」將進入結案報告（可標記為錯誤或中止），點擊「取消」繼續燒製。")) {
-                    setOutcome('error');
-                    setNotes('使用者手動中止');
-                    setShowFinishModal(true);
-                }
-            }}
-            className="flex items-center justify-center gap-2 py-4 rounded-xl border-2 border-stone-200 dark:border-stone-700 text-stone-600 dark:text-stone-400 hover:border-red-200 dark:hover:border-red-800 hover:bg-red-50 dark:hover:bg-red-900/30 hover:text-red-600 dark:hover:text-red-400 transition-all font-bold"
+          <button 
+            onClick={handleCancel}
+            disabled={isSubmitting}
+            className="flex items-center justify-center gap-2 py-4 rounded-xl border-2 border-stone-200 dark:border-stone-700 text-stone-600 dark:text-stone-400 hover:border-red-200 hover:bg-red-50 hover:text-red-600 transition-all font-bold disabled:opacity-50"
           >
             <XCircle className="w-5 h-5" /> 中止燒製
           </button>
-          <button
-            onClick={() => {
-                setOutcome('perfect');
-                setShowFinishModal(true);
-            }}
-            className="flex items-center justify-center gap-2 py-4 rounded-xl bg-green-600 text-white hover:bg-green-700 shadow-lg hover:shadow-xl transition-all font-bold"
+          <button 
+            onClick={() => setShowFinishModal(true)}
+            disabled={isSubmitting}
+            className="flex items-center justify-center gap-2 py-4 rounded-xl bg-green-600 text-white hover:bg-green-700 shadow-lg transition-all font-bold disabled:opacity-50"
           >
             <CheckCircle className="w-5 h-5" /> 結束並紀錄
           </button>
         </div>
-        
-        <p className="text-center text-xs text-stone-400 mt-6">
-          * 溫度顯示為根據排程的估算值，並非感測器實測數據。
-        </p>
       </div>
     </div>
   );
