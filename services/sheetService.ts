@@ -4,10 +4,9 @@ interface ApiResponse {
   status: 'success' | 'error';
   message?: string;
   data?: any;
-  webhook?: string; // [新增]
+  webhook?: string;
 }
 
-// [修改] loginToSheet 回傳 webhook
 export const loginToSheet = async (scriptUrl: string, username: string, password: string): Promise<{success: boolean, webhook?: string}> => {
   try {
     const response = await fetch(scriptUrl, {
@@ -76,7 +75,6 @@ export const sendDiscordMessage = async (scriptUrl: string, webhookUrl: string, 
   }
 };
 
-// [新增] 儲存 Webhook 設定
 export const saveSettingsToSheet = async (scriptUrl: string, username: string, webhook: string): Promise<boolean> => {
   try {
     const response = await fetch(scriptUrl, {
@@ -91,6 +89,25 @@ export const saveSettingsToSheet = async (scriptUrl: string, username: string, w
     return result.status === 'success';
   } catch (error) {
     console.error("Save settings failed", error);
+    return false;
+  }
+};
+
+// [新增] 儲存燒製模板
+export const saveTemplate = async (scriptUrl: string, templateName: string, segments: any[]): Promise<boolean> => {
+  try {
+    const response = await fetch(scriptUrl, {
+      method: 'POST',
+      body: JSON.stringify({ 
+        action: 'saveTemplate', 
+        name: templateName, 
+        segments: segments 
+      }),
+    });
+    const result: ApiResponse = await response.json();
+    return result.status === 'success';
+  } catch (error) {
+    console.error("Save template failed", error);
     return false;
   }
 };

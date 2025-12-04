@@ -4,16 +4,26 @@ import Login from './components/Login';
 import ScheduleEditor from './components/ScheduleEditor';
 import ActiveFiring from './components/ActiveFiring';
 import HistoryLogView from './components/HistoryLog';
-import Settings from './components/Settings';
+import Settings from './components/Settings'; // 確保這裡引用正確
 import Layout from './components/Layout';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { KilnProvider, useKiln } from './contexts/KilnContext';
 import { FiringLog, calculateTheoreticalDuration } from './types';
 
-// 保護路由元件：未登入時顯示登入畫面，已登入顯示子元件
+// 保護路由元件
 const ProtectedRoute: React.FC<{ children: React.ReactNode, isDarkMode: boolean, toggleDarkMode: () => void }> = ({ children, isDarkMode, toggleDarkMode }) => {
-  const { isAuthenticated, login } = useAuth();
+  const { isAuthenticated, isLoading, login } = useAuth();
   
+  // 1. 如果正在從 localStorage 讀取登入資訊，顯示 Loading (避免閃爍)
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-stone-100 dark:bg-stone-950 flex items-center justify-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-clay-600"></div>
+      </div>
+    );
+  }
+
+  // 2. 如果讀取完畢確認未登入，才導向 Login
   if (!isAuthenticated) {
     return (
       <Login 
@@ -23,10 +33,11 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode, isDarkMode: boolean,
       />
     );
   }
+  
   return <>{children}</>;
 };
 
-// 燒製監控頁面 Wrapper (連接 Context 與 Component)
+// 監控頁面 Wrapper
 const MonitorPage = ({ isDarkMode }: { isDarkMode: boolean }) => {
   const { activeSchedule, startTime, cancelFiring, finishFiring, addLog } = useKiln();
   const navigate = useNavigate();
@@ -43,19 +54,14 @@ const MonitorPage = ({ isDarkMode }: { isDarkMode: boolean }) => {
       clayWeight: activeSchedule.clayWeight,
       notes: result.notes,
       outcome: result.outcome,
-      // 計算理論時間作為參考
       theoreticalDuration: calculateTheoreticalDuration(activeSchedule.segments)
     };
 
-    // 新增紀錄並同步到雲端
     await addLog(newLog);
-    
-    // 清除燒製狀態並導向歷史頁面
     finishFiring();
     navigate('/history');
   };
 
-  // 若無進行中的燒製，顯示提示並導回首頁或顯示訊息
   if (!activeSchedule || !startTime) {
     return (
       <div className="flex flex-col items-center justify-center h-64 text-center p-6 border-2 border-dashed border-stone-200 dark:border-stone-800 rounded-xl m-4">
@@ -75,36 +81,26 @@ const MonitorPage = ({ isDarkMode }: { isDarkMode: boolean }) => {
       schedule={activeSchedule} 
       startTime={startTime} 
       onFinish={handleFinish}
-      onCancel={() => { 
-        cancelFiring(); 
-        navigate('/'); 
-      }}
+      onCancel={() => { cancelFiring(); navigate('/'); }}
       isDarkMode={isDarkMode}
     />
   );
 };
 
-// 排程頁面 Wrapper
 const PlanPage = ({ isDarkMode }: { isDarkMode: boolean }) => {
   const { startFiring, calibration } = useKiln();
   const navigate = useNavigate();
-  
   return (
     <ScheduleEditor 
-      onStartFiring={(schedule) => {
-        startFiring(schedule);
-        navigate('/monitor');
-      }} 
+      onStartFiring={(schedule) => { startFiring(schedule); navigate('/monitor'); }} 
       calibrationFactor={calibration.factor}
       isDarkMode={isDarkMode}
     />
   );
 };
 
-// 歷史頁面 Wrapper
 const HistoryPage = ({ isDarkMode }: { isDarkMode: boolean }) => {
   const { logs, calibration, updateCalibration } = useKiln();
-  
   return (
     <HistoryLogView 
       logs={logs} 
@@ -116,12 +112,8 @@ const HistoryPage = ({ isDarkMode }: { isDarkMode: boolean }) => {
 };
 
 function App() {
-  // 初始化 Dark Mode (讀取 localStorage)
-  const [isDarkMode, setIsDarkMode] = useState(() => {
-    return localStorage.getItem('theme') === 'dark';
-  });
+  const [isDarkMode, setIsDarkMode] = useState(() => localStorage.getItem('theme') === 'dark');
 
-  // 監聽 Dark Mode 變更並套用至 HTML 標籤
   useEffect(() => {
     if (isDarkMode) {
       document.documentElement.classList.add('dark');
@@ -139,10 +131,7 @@ function App() {
       <AuthProvider>
         <KilnProvider>
           <Routes>
-            {/* 受保護的路由區域 */}
-            <Route 
-              path="/" 
-              element={
+            <Route path="/" element={
                 <ProtectedRoute isDarkMode={isDarkMode} toggleDarkMode={toggleDarkMode}>
                   <Layout isDarkMode={isDarkMode} toggleDarkMode={toggleDarkMode} />
                 </ProtectedRoute>
@@ -153,8 +142,6 @@ function App() {
               <Route path="history" element={<HistoryPage isDarkMode={isDarkMode} />} />
               <Route path="settings" element={<Settings />} />
             </Route>
-
-            {/* 處理未知路徑，導向首頁 */}
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </KilnProvider>
